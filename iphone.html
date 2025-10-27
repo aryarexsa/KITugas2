@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>E2E Chat (AES-GCM)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1rem; }
+    .row { display: flex; gap: .5rem; margin-bottom: .5rem; flex-wrap: wrap; }
+    input, button { font-size: 1rem; padding: .5rem; }
+    #log { border: 1px solid #ddd; border-radius: .5rem; padding: .75rem; height: 50vh; overflow: auto; }
+    #you { color: #0b7285; }
+    #peer { color: #2b8a3e; }
+    .small { font-size: .85rem; color: #666; }
+  </style>
+</head>
+<body>
+  <h2>Encrypted Chat (AES-GCM, PSK)</h2>
+  <div class="row">
+    <label>Server WS URL:</label>
+    <input id="wsUrl" size="35" value="ws://YOUR_SERVER_IP:8765">
+    <button id="connectBtn">Connect</button>
+  </div>
+  <div class="row">
+    <label>Passphrase (shared):</label>
+    <input id="pass" type="password" size="30" placeholder="Same on both devices">
+  </div>
+  <div id="log"></div>
+  <div class="row">
+    <input id="msg" size="40" placeholder="Type message..." disabled>
+    <button id="sendBtn" disabled>Send</button>
+  </div>
+  <p class="small">This page encrypts/decrypts locally using Web Crypto. The server only relays ciphertext.</p>
+
+<script>
+const NONCE_LEN = 12;
+const SALT_BYTES = new TextEncoder().encode("TI-KI-KEAMANAN-INFO-2025"); // shared constant
+const ITER = 200000;
+
+let ws = null;
+let aesKey = null;
+
+function logLine(who, text) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.id = who === "you" ? "you" : "peer";
+  p.textContent = `${who}> ${text}`;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function deriveKey(passphrase) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), {name: "PBKDF2"}, false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {name: "PBKDF2", salt: SALT_BYTES, iterations: ITER, hash: "SHA-256"},
+    keyMaterial,
+    {name: "AES-GCM", length: 256},
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+
+async function encryptMsg(key, text) {
+  const enc = new TextEncoder();
+  const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
+  const ct = await crypto.subtle.encrypt({name: "AES-GCM", iv: nonce}, key, enc.encode(text));
+  // package: nonce | ct (ArrayBuffer)
+  const out = new Uint8Array(NONCE_LEN + ct.byteLength);
+  out.set(nonce, 0);
+  out.set(new Uint8Array(ct), NONCE_LEN);
+  // base64
+  return btoa(String.fromCharCode(...out));
+}
+
+async function decryptMsg(key, b64) {
+  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const nonce = bin.slice(0, NONCE_LEN);
+  const ct = bin.slice(NONCE_LEN);
+  const pt = await crypto.subtle.decrypt({name: "AES-GCM", iv: nonce}, key, ct);
+  return new TextDecoder().decode(pt);
+}
+
+document.getElementById("connectBtn").onclick = async () => {
+  const url = document.getElementById("wsUrl").value.trim();
+  const pass = document.getElementById("pass").value;
+  if (!url || !pass) {
+    alert("Isi WS URL dan passphrase yang sama pada kedua device.");
+    return;
+  }
+  try {
+    aesKey = await deriveKey(pass);
+  } catch (e) {
+    alert("Gagal derive key: " + e);
+    return;
+  }
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    document.getElementById("msg").disabled = false;
+    document.getElementById("sendBtn").disabled = false;
+    logLine("system", "Connected. Type your message.");
+  };
+  ws.onmessage = async (evt) => {
+    try {
+      const text = await decryptMsg(aesKey, evt.data);
+      logLine("peer", text);
+    } catch (e) {
+      logLine("system", "Decryption failed (wrong passphrase?)");
+    }
+  };
+  ws.onclose = () => logLine("system", "Disconnected.");
+  ws.onerror = () => logLine("system", "WebSocket error");
+};
+
+document.getElementById("sendBtn").onclick = async () => {
+  const inp = document.getElementById("msg");
+  const text = inp.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+  const payload = await encryptMsg(aesKey, text);
+  ws.send(payload);
+  logLine("you", text);
+  inp.value = "";
+};
+
+document.getElementById("msg").addEventListener("keydown", (e)=>{
+  if (e.key === "Enter") document.getElementById("sendBtn").click();
+});
+</script>
+</body>
+</html>
